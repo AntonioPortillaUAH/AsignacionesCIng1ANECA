@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asignaciones ANECA</title>
+<link rel="stylesheet" href="styles.css">
+<script src="vendor/xlsx.full.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>Asignación de títulos a evaluadores</h1>
+  <p class="sub">Comisión de Ingeniería · Los datos se procesan solo en tu navegador; no se envían a ningún servidor.</p>
+  <nav id="tabs">
+    <button data-tab="datos" class="active">1. Datos</button>
+    <button data-tab="esfuerzos">2. Esfuerzos</button>
+    <button data-tab="afinidad">3. Afinidad</button>
+    <button data-tab="asignacion">4. Asignación</button>
+  </nav>
+</header>
+
+<main>
+<!-- ===================== 1. DATOS ===================== -->
+<section id="tab-datos" class="tab active">
+  <div class="grid2">
+    <div class="card">
+      <h2>Evaluadores</h2>
+      <input type="file" id="fileEval" accept=".xlsx,.xls,.csv,.ods">
+      <button class="link" id="tplEval">Descargar plantilla</button>
+      <div id="mapEval" class="mapping"></div>
+      <div id="sumEval" class="summary"></div>
+    </div>
+    <div class="card">
+      <h2>Títulos</h2>
+      <input type="file" id="fileTit" accept=".xlsx,.xls,.csv,.ods">
+      <button class="link" id="tplTit">Descargar plantilla</button>
+      <div id="mapTit" class="mapping"></div>
+      <div id="sumTit" class="summary"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Vista previa</h2>
+    <div class="toolbar">
+      <label><input type="radio" name="prev" value="eval" checked> Evaluadores</label>
+      <label><input type="radio" name="prev" value="tit"> Títulos</label>
+    </div>
+    <div id="preview" class="tablewrap"></div>
+  </div>
+  <div class="card">
+    <h2>Sesión</h2>
+    <p>El trabajo se guarda automáticamente en este navegador. Para pasárselo a otra persona, exporta la sesión y que la importe.</p>
+    <div class="toolbar">
+      <button id="btnExportSession">Exportar sesión (.json)</button>
+      <label class="btn">Importar sesión<input type="file" id="fileSession" accept=".json" hidden></label>
+      <button id="btnReset" class="danger">Borrar todo</button>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 2. ESFUERZOS ===================== -->
+<section id="tab-esfuerzos" class="tab">
+  <div class="card">
+    <h2>Esfuerzo por tipo de evaluación</h2>
+    <p>Unidades de esfuerzo que supone cada evaluación para un evaluador. <span class="warn">Valores provisionales: pendientes de fijar.</span></p>
+    <table class="effort" id="effortTable"></table>
+    <div class="toolbar"><button id="btnEffortDefault">Restaurar valores por defecto</button></div>
+  </div>
+  <div class="card">
+    <h2>Parámetros de la asignación</h2>
+    <div class="params">
+      <label>Evaluadores por título
+        <input type="number" id="pK" min="1" max="5" step="1"></label>
+      <label>Prioridad
+        <span class="range"><small>Equilibrio</small><input type="range" id="pAlpha" min="0" max="100"><small>Afinidad</small></span></label>
+      <label><input type="checkbox" id="pConflict"> Evitar que un evaluador evalúe títulos de su propia universidad</label>
+      <label><input type="checkbox" id="pOnlyAffine"> No asignar a evaluadores sin afinidad (salvo que no haya ninguno afín)</label>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 3. AFINIDAD ===================== -->
+<section id="tab-afinidad" class="tab">
+  <div class="card">
+    <h2>Palabras clave por área de conocimiento</h2>
+    <p>La afinidad entre un título y un evaluador se calcula buscando estas palabras clave en la denominación del título (y en su rama/ámbito, si existe). Separa las palabras clave con comas. Las áreas aparecen al cargar la Excel de evaluadores.</p>
+    <div id="kwList"></div>
+  </div>
+  <div class="card">
+    <h2>Matriz de afinidad</h2>
+    <p>Número de evaluadores afines para cada título. Los títulos sin ningún evaluador afín aparecen primero.</p>
+    <div id="affSummary" class="tablewrap"></div>
+  </div>
+</section>
+
+<!-- ===================== 4. ASIGNACIÓN ===================== -->
+<section id="tab-asignacion" class="tab">
+  <div class="card">
+    <div class="toolbar">
+      <button id="btnRun" class="primary">Calcular asignación</button>
+      <button id="btnClearLocks">Quitar fijaciones</button>
+      <button id="btnExportXlsx">Exportar a Excel</button>
+      <span id="runInfo" class="muted"></span>
+    </div>
+    <div id="kpis" class="kpis"></div>
+  </div>
+  <div class="grid2">
+    <div class="card">
+      <h2>Carga por evaluador</h2>
+      <div id="loads"></div>
+    </div>
+    <div class="card">
+      <h2>Asignaciones</h2>
+      <div class="toolbar"><input type="search" id="filterAsg" placeholder="Filtrar…"></div>
+      <p class="muted">Cambia un evaluador en el desplegable para fijarlo (🔒). Al recalcular se respetan las fijaciones.</p>
+      <div id="asgTable" class="tablewrap tall"></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<script src="keywords.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
