@@ -60,16 +60,22 @@
 <!-- ===================== 2. ESFUERZOS ===================== -->
 <section id="tab-esfuerzos" class="tab">
   <div class="card">
-    <h2>Esfuerzo por tipo de evaluación</h2>
-    <p>Unidades de esfuerzo que supone cada evaluación para un evaluador. <span class="warn">Valores provisionales: pendientes de fijar.</span></p>
+    <h2>Pesos</h2>
+    <p>Esfuerzo de un título = <b>peso del nivel × peso del tipo de evaluación</b>.</p>
+    <div class="weights">
+      <table class="effort"><thead><tr><th>Nivel</th><th class="num">Peso</th></tr></thead><tbody id="wNivel"></tbody></table>
+      <table class="effort"><thead><tr><th>Tipo</th><th class="num">Peso</th></tr></thead><tbody id="wAccion"></tbody></table>
+    </div>
+    <h3>Esfuerzo resultante</h3>
     <table class="effort" id="effortTable"></table>
     <div class="toolbar"><button id="btnEffortDefault">Restaurar valores por defecto</button></div>
   </div>
   <div class="card">
     <h2>Parámetros de la asignación</h2>
     <div class="params">
-      <label>Evaluadores por título
+      <label>Evaluadores académicos por título
         <input type="number" id="pK" min="1" max="5" step="1"></label>
+      <label><input type="checkbox" id="pStudent"> Asignar además un vocal estudiante a cada título</label>
       <label>Prioridad
         <span class="range"><small>Equilibrio</small><input type="range" id="pAlpha" min="0" max="100"><small>Afinidad</small></span></label>
       <label><input type="checkbox" id="pConflict"> Evitar que un evaluador evalúe títulos de su propia universidad</label>

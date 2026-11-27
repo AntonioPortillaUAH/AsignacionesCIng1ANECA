@@ -66,3 +66,5 @@ table.effort input{width:80px;text-align:right}
 .aff-2{color:var(--ok);border-color:var(--ok)}
 td select{max-width:220px}
 .lock{cursor:pointer;user-select:none}
+h3{margin:14px 0 6px;font-size:14px}
+.weights{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}

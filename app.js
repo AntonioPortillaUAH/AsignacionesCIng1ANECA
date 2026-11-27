@@ -6,19 +6,21 @@
 
 // ---------------------------------------------------------------- constantes
 const NIVELES = ['Grado', 'Máster'];
-const ACCIONES = ['Verificación', 'Modificación', 'Seguimiento', 'Alegación'];
-// Valores PROVISIONALES (pendientes de fijar)
-const DEFAULT_EFFORT = {
-  'Grado':  { 'Verificación': 3, 'Modificación': 1.5, 'Seguimiento': 1,    'Alegación': 1 },
-  'Máster': { 'Verificación': 2, 'Modificación': 1,   'Seguimiento': 0.75, 'Alegación': 0.75 }
+const ACCIONES = ['Verificación', 'Modificación', 'Seguimiento', 'Alegación a Verificación', 'Alegación a Modificación'];
+const ACC_CORTO = { 'Verificación': 'Verifica', 'Modificación': 'Modifica', 'Seguimiento': 'Seguimiento', 'Alegación a Verificación': 'AleVerifica', 'Alegación a Modificación': 'AleModifica' };
+// Esfuerzo de un título = peso del nivel × peso del tipo de evaluación
+const DEFAULT_WEIGHTS = {
+  nivel: { 'Grado': 0.66, 'Máster': 0.33 },
+  accion: { 'Verificación': 0.4, 'Modificación': 0.1, 'Seguimiento': 0.5, 'Alegación a Verificación': 0.6, 'Alegación a Modificación': 0.4 }
 };
-const DEFAULT_PARAMS = { k: 1, alpha: 60, conflict: true, onlyAffine: true };
-const STORE_KEY = 'asignacionesAneca.v1';
+const DEFAULT_PARAMS = { k: 2, student: true, alpha: 60, conflict: true, onlyAffine: true };
+const STORE_KEY = 'asignacionesAneca.v2';
 
 const EVAL_FIELDS = [
   { key: 'nombre', label: 'Nombre *', req: true, pats: ['nombre y apellidos', 'evaluador', 'nombre', 'experto'] },
   { key: 'apellidos', label: 'Apellidos', pats: ['apellidos', 'apellido'] },
   { key: 'area', label: 'Área / ámbito *', req: true, pats: ['area de conocimiento', 'ambito de conocimiento', 'area', 'ambito', 'conocimiento', 'especialidad'] },
+  { key: 'rol', label: 'Perfil (académico / estudiante)', pats: ['perfil', 'rol', 'vocal', 'colectivo', 'tipo', 'categoria', 'cargo'] },
   { key: 'universidad', label: 'Universidad', pats: ['universidad', 'institucion', 'centro', 'organismo'] },
   { key: 'capacidad', label: 'Capacidad (peso)', pats: ['capacidad', 'disponibilidad', 'peso', 'carga maxima'] },
   { key: 'email', label: 'Email', pats: ['email', 'correo', 'e-mail', 'mail'] }
@@ -26,8 +28,8 @@ const EVAL_FIELDS = [
 const TIT_FIELDS = [
   { key: 'codigo', label: 'Código / RUCT', pats: ['ruct', 'codigo', 'expediente', 'id'] },
   { key: 'denominacion', label: 'Denominación *', req: true, pats: ['denominacion', 'titulo', 'titulacion', 'nombre'] },
-  { key: 'nivel', label: 'Nivel (Grado/Máster)', pats: ['nivel', 'tipo de titulo', 'ciclo', 'tipo'] },
-  { key: 'accion', label: 'Tipo de evaluación', pats: ['tipo de evaluacion', 'evaluacion', 'procedimiento', 'accion', 'fase', 'tramite'] },
+  { key: 'nivel', label: 'Nivel (Grado/Máster)', pats: ['nivel', 'tipo de titulo', 'ciclo'] },
+  { key: 'accion', label: 'Tipo de evaluación', pats: ['tipo de evaluacion', 'evaluacion', 'procedimiento', 'accion', 'fase', 'tramite', 'tipo'] },
   { key: 'universidad', label: 'Universidad', pats: ['universidad', 'institucion', 'centro'] },
   { key: 'rama', label: 'Rama / ámbito', pats: ['rama', 'ambito', 'area', 'campo'] }
 ];
@@ -42,11 +44,12 @@ function freshState() {
   return {
     evalRaw: null, titRaw: null,
     mapEval: {}, mapTit: {},
-    effort: JSON.parse(JSON.stringify(DEFAULT_EFFORT)),
+    weights: JSON.parse(JSON.stringify(DEFAULT_WEIGHTS)),
     params: { ...DEFAULT_PARAMS },
     keywords: {},            // área (texto original) -> "kw1, kw2"
     titOverrides: {},        // idTítulo -> {nivel, accion}
-    asg: {},                 // idTítulo -> [idEval | null, ...]
+    evalOverrides: {},       // idEvaluador -> {estudiante: bool}
+    asg: {},                 // idTítulo -> [idEval | null, ...]  (0..k-1 académicos, k = vocal estudiante)
     locks: {},               // idTítulo -> [bool, ...]
     lastRun: null
   };
@@ -65,8 +68,12 @@ function load() {
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const norm = (s) => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9ñ]+/g, ' ').trim();
-const fmt = (n) => (Math.round(n * 100) / 100).toLocaleString('es-ES');
+const fmt = (n) => (Math.round(n * 1000) / 1000).toLocaleString('es-ES');
 const tokens = (s) => norm(s).split(' ').filter(w => w && !STOP.has(w));
+const K_ = () => Math.max(1, parseInt(S.params.k) || 1);
+const NSLOT = () => K_() + (S.params.student ? 1 : 0);
+const isStudentSlot = (s) => S.params.student && s === K_();
+const slotName = (s) => isStudentSlot(s) ? 'Vocal estudiante' : 'Evaluador ' + (s + 1);
 
 function tokMatch(a, b) {
   if (a === b) return true;
@@ -105,29 +112,38 @@ function parseNivel(v, denom) {
 }
 function parseAccion(v) {
   const n = norm(v);
-  if (/aleg/.test(n)) return 'Alegación';
+  if (/aleg|^ale/.test(n)) return /modif/.test(n) ? 'Alegación a Modificación' : 'Alegación a Verificación';
   if (/verif/.test(n)) return 'Verificación';
   if (/segui/.test(n)) return 'Seguimiento';
   if (/modif/.test(n)) return 'Modificación';
   return '';
 }
+const isStudentText = (v) => /estudian|alumn/.test(norm(v));
 
 // ---------------------------------------------------------------- modelo derivado
 function getEvaluators() {
   if (!S.evalRaw) return [];
   const m = S.mapEval;
   return S.evalRaw.rows.map((r, i) => {
+    const id = 'e' + i;
     const nombre = [r[m.nombre], m.apellidos ? r[m.apellidos] : ''].filter(Boolean).join(' ').trim();
     let cap = m.capacidad ? parseFloat(String(r[m.capacidad]).replace(',', '.')) : 1;
     if (!isFinite(cap) || cap < 0) cap = 1;
+    const areaTxt = m.area ? r[m.area] : '';
+    const ov = S.evalOverrides[id] || {};
+    const estudiante = ov.estudiante != null ? ov.estudiante : isStudentText((m.rol ? r[m.rol] : '') + ' ' + areaTxt);
     return {
-      id: 'e' + i, nombre: nombre || ('Evaluador ' + (i + 1)),
-      areas: splitAreas(m.area ? r[m.area] : ''),
+      id, nombre: nombre || ('Evaluador ' + (i + 1)), estudiante,
+      areas: splitAreas(areaTxt).filter(a => !isStudentText(a)),
       uni: m.universidad ? String(r[m.universidad] || '').trim() : '',
       email: m.email ? String(r[m.email] || '') : '',
       cap
     };
-  }).filter(e => e.nombre);
+  });
+}
+function effortOf(nivel, accion) {
+  const a = S.weights.nivel[nivel], b = S.weights.accion[accion];
+  return (a != null && b != null) ? Number(a) * Number(b) : 0;
 }
 function getTitles() {
   if (!S.titRaw) return [];
@@ -138,9 +154,8 @@ function getTitles() {
     const ov = S.titOverrides[id] || {};
     const nivel = ov.nivel || parseNivel(m.nivel ? r[m.nivel] : '', denom);
     const accion = ov.accion || parseAccion(m.accion ? r[m.accion] : '');
-    const effort = (S.effort[nivel] && S.effort[nivel][accion] != null) ? Number(S.effort[nivel][accion]) : 0;
     return {
-      id, denom, nivel, accion, effort,
+      id, denom, nivel, accion, effort: effortOf(nivel, accion),
       codigo: m.codigo ? String(r[m.codigo] || '') : '',
       uni: m.universidad ? String(r[m.universidad] || '').trim() : '',
       rama: m.rama ? String(r[m.rama] || '') : ''
@@ -149,7 +164,7 @@ function getTitles() {
 }
 function allAreas(evals) {
   const set = new Map();
-  for (const e of evals) for (const a of e.areas) {
+  for (const e of evals) if (!e.estudiante) for (const a of e.areas) {
     const k = norm(a); if (!set.has(k)) set.set(k, { name: a, n: 0 }); set.get(k).n++;
   }
   return [...set.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'));
@@ -161,8 +176,7 @@ function keywordsFor(area) {
   return '';
 }
 function areaPhrases(area) {
-  const list = [area, ...keywordsFor(area).split(',')].map(tokens).filter(t => t.length);
-  return list;
+  return [area, ...keywordsFor(area).split(',')].map(tokens).filter(t => t.length);
 }
 
 // afinidad: nº de palabras clave del área encontradas en el título (máximo sobre las áreas del evaluador)
@@ -195,74 +209,64 @@ function uniConflict(t, e) {
 }
 
 // ---------------------------------------------------------------- algoritmo
-function computeAssignment() {
-  const evals = getEvaluators().filter(e => e.cap > 0);
-  const titles = getTitles();
-  const K = Math.max(1, parseInt(S.params.k) || 1);
-  const wA = 0.1 + 0.1 * Number(S.params.alpha);
-  const aff = buildAffinity(evals, titles);
-  const E = {}; evals.forEach(e => E[e.id] = e);
+// Optimiza un "grupo" de plazas (p.ej. las 2 de académicos, o la del vocal estudiante)
+// minimizando  wA·Σ(1 − afinidad) + Σ_j ((carga_j − objetivo_j)/esfuerzo_medio)²
+function optimizePool(titles, pool, slotIdx, useAff, aff, asg) {
+  const wA = useAff ? 0.1 + 0.1 * Number(S.params.alpha) : 0;
+  const E = {}; pool.forEach(e => E[e.id] = e);
+  const nS = slotIdx.length;
 
-  // candidatos por título
   const cand = {};
   for (const t of titles) {
-    let c = evals.filter(e => !(S.params.conflict && uniConflict(t, e)));
-    if (S.params.onlyAffine) {
+    let c = pool.filter(e => !(S.params.conflict && uniConflict(t, e)));
+    if (useAff && S.params.onlyAffine) {
       const a = c.filter(e => aff[t.id][e.id] > 0);
-      if (a.length >= K) c = a;
+      if (a.length >= nS) c = a;
     }
     cand[t.id] = new Set(c.map(e => e.id));
   }
-
-  const D = titles.reduce((s, t) => s + t.effort * K, 0);
-  const capSum = evals.reduce((s, e) => s + e.cap, 0) || 1;
-  const T = {}; evals.forEach(e => T[e.id] = D * e.cap / capSum);
-  const meanE = D / Math.max(1, titles.length * K) || 1;
-  const L = {}; evals.forEach(e => L[e.id] = 0);
-
+  const D = titles.reduce((s, t) => s + t.effort * nS, 0);
+  const capSum = pool.reduce((s, e) => s + e.cap, 0) || 1;
+  const T = {}; pool.forEach(e => T[e.id] = D * e.cap / capSum);
+  const meanE = D / Math.max(1, titles.length * nS) || 1;
+  const L = {}; pool.forEach(e => L[e.id] = 0);
   const balD = (j, de) => { const a = (L[j] - T[j]) / meanE, b = (L[j] + de - T[j]) / meanE; return b * b - a * a; };
-  const affC = (t, j) => wA * (1 - affVal(aff[t.id][j]));
-
-  // asignación: slots
-  const asg = {};
-  for (const t of titles) {
-    asg[t.id] = new Array(K).fill(null);
-    const prev = S.asg[t.id] || [], lk = S.locks[t.id] || [];
-    for (let s = 0; s < K; s++) if (lk[s] && prev[s] && E[prev[s]]) { asg[t.id][s] = prev[s]; L[prev[s]] += t.effort; }
-  }
-  // orden: los más restringidos y los de más esfuerzo primero
-  const order = [...titles].sort((a, b) => (cand[a.id].size - cand[b.id].size) || (b.effort - a.effort));
-  for (const t of order) {
-    for (let s = 0; s < K; s++) {
-      if (asg[t.id][s]) continue;
-      let best = null, bc = Infinity;
-      for (const j of cand[t.id]) {
-        if (asg[t.id].includes(j)) continue;
-        const c = affC(t, j) + balD(j, t.effort);
-        if (c < bc) { bc = c; best = j; }
-      }
-      asg[t.id][s] = best;
-      if (best) L[best] += t.effort;
-    }
-  }
-
-  // búsqueda local: movimientos e intercambios
+  const affC = (t, j) => useAff ? wA * (1 - affVal(aff[t.id][j])) : 0;
   const locked = (t, s) => !!(S.locks[t.id] || [])[s];
+
+  for (const t of titles) {
+    const prev = S.asg[t.id] || [];
+    for (const s of slotIdx) if (locked(t, s) && prev[s] && E[prev[s]]) { asg[t.id][s] = prev[s]; L[prev[s]] += t.effort; }
+  }
+  const order = [...titles].sort((a, b) => (cand[a.id].size - cand[b.id].size) || (b.effort - a.effort));
+  for (const t of order) for (const s of slotIdx) {
+    if (asg[t.id][s]) continue;
+    let best = null, bc = Infinity;
+    for (const j of cand[t.id]) {
+      if (asg[t.id].includes(j)) continue;
+      const c = affC(t, j) + balD(j, t.effort);
+      if (c < bc) { bc = c; best = j; }
+    }
+    asg[t.id][s] = best;
+    if (best) L[best] += t.effort;
+  }
+
   const slots = [];
-  for (const t of titles) for (let s = 0; s < K; s++) if (asg[t.id][s] && !locked(t, s)) slots.push([t, s]);
+  for (const t of titles) for (const s of slotIdx) if (asg[t.id][s] && !locked(t, s)) slots.push([t, s]);
   let improved = true, pass = 0;
   while (improved && pass++ < 60) {
     improved = false;
     for (const [t, s] of slots) {                       // mover
       const a = asg[t.id][s]; const e = t.effort;
       let best = null, bd = -1e-9;
+      L[a] -= e;
+      const back = ((L[a] + e - T[a]) / meanE) ** 2 - ((L[a] - T[a]) / meanE) ** 2;
       for (const b of cand[t.id]) {
         if (b === a || asg[t.id].includes(b)) continue;
-        L[a] -= e;
-        const d = affC(t, b) - affC(t, a) + balD(b, e) - (((L[a] + e - T[a]) / meanE) ** 2 - ((L[a] - T[a]) / meanE) ** 2);
-        L[a] += e;
+        const d = affC(t, b) - affC(t, a) + balD(b, e) - back;
         if (d < bd) { bd = d; best = b; }
       }
+      L[a] += e;
       if (best) { asg[t.id][s] = best; L[a] -= e; L[best] += e; improved = true; }
     }
     for (let i = 0; i < slots.length; i++) {            // intercambiar
@@ -279,6 +283,17 @@ function computeAssignment() {
       }
     }
   }
+}
+
+function computeAssignment() {
+  const all = getEvaluators().filter(e => e.cap > 0);
+  const titles = getTitles();
+  const aff = buildAffinity(all, titles);
+  const K = K_(), N = NSLOT();
+  const asg = {};
+  titles.forEach(t => asg[t.id] = new Array(N).fill(null));
+  optimizePool(titles, all.filter(e => !e.estudiante), [...Array(K).keys()], true, aff, asg);
+  if (S.params.student) optimizePool(titles, all.filter(e => e.estudiante), [K], false, aff, asg);
   S.asg = asg;
   S.lastRun = new Date().toISOString();
   save();
@@ -287,28 +302,34 @@ function computeAssignment() {
 // estadísticas de una asignación
 function stats() {
   const evals = getEvaluators(), titles = getTitles();
-  const K = Math.max(1, parseInt(S.params.k) || 1);
+  const K = K_(), N = NSLOT();
   const aff = buildAffinity(evals, titles);
-  const active = evals.filter(e => e.cap > 0);
-  const D = titles.reduce((s, t) => s + t.effort * K, 0);
-  const capSum = active.reduce((s, e) => s + e.cap, 0) || 1;
   const per = {};
-  evals.forEach(e => per[e.id] = { e, load: 0, n: 0, target: e.cap > 0 ? D * e.cap / capSum : 0, items: [] });
-  let slots = 0, empty = 0, lv = [0, 0, 0], conflicts = 0;
+  evals.forEach(e => per[e.id] = { e, load: 0, n: 0, target: 0, items: [] });
+  for (const grp of [false, true]) {
+    if (grp && !S.params.student) continue;
+    const pool = evals.filter(e => e.estudiante === grp && e.cap > 0);
+    const D = titles.reduce((s, t) => s + t.effort * (grp ? 1 : K), 0);
+    const cs = pool.reduce((s, e) => s + e.cap, 0) || 1;
+    pool.forEach(e => per[e.id].target = D * e.cap / cs);
+  }
+  let slots = 0, empty = 0, lv = [0, 0, 0], conflicts = 0, emptyStu = 0;
   for (const t of titles) {
     const a = S.asg[t.id] || [];
-    for (let s = 0; s < K; s++) {
-      slots++;
+    for (let s = 0; s < N; s++) {
       const j = a[s];
-      if (!j || !per[j]) { empty++; continue; }
+      if (isStudentSlot(s)) { if (!j || !per[j]) emptyStu++; }
+      else { slots++; if (!j || !per[j]) empty++; }
+      if (!j || !per[j]) continue;
       per[j].load += t.effort; per[j].n++; per[j].items.push(t);
-      lv[affLevel(aff[t.id][j])]++;
+      if (!isStudentSlot(s)) lv[affLevel(aff[t.id][j])]++;
       if (uniConflict(t, per[j].e)) conflicts++;
     }
   }
-  const loads = active.map(e => per[e.id].load - per[e.id].target);
-  const dev = loads.length ? Math.sqrt(loads.reduce((s, x) => s + x * x, 0) / loads.length) : 0;
-  return { evals, titles, aff, per, K, D, slots, empty, lv, conflicts, dev };
+  const acad = evals.filter(e => !e.estudiante && e.cap > 0).map(e => per[e.id].load - per[e.id].target);
+  const dev = acad.length ? Math.sqrt(acad.reduce((s, x) => s + x * x, 0) / acad.length) : 0;
+  const D = titles.reduce((s, t) => s + t.effort, 0);
+  return { evals, titles, aff, per, K, N, D, slots, empty, emptyStu, lv, conflicts, dev };
 }
 
 // ---------------------------------------------------------------- lectura de ficheros
@@ -345,18 +366,20 @@ function renderMapping(el, raw, fields, map, onChange) {
 }
 
 function renderDatos() {
-  renderMapping($('#mapEval'), S.evalRaw, EVAL_FIELDS, S.mapEval, () => { S.asg = {}; S.locks = {}; save(); renderAll(); });
+  renderMapping($('#mapEval'), S.evalRaw, EVAL_FIELDS, S.mapEval, () => { S.asg = {}; S.locks = {}; S.evalOverrides = {}; save(); renderAll(); });
   renderMapping($('#mapTit'), S.titRaw, TIT_FIELDS, S.mapTit, () => { S.asg = {}; S.locks = {}; save(); renderAll(); });
   const ev = getEvaluators(), ti = getTitles();
   if (S.evalRaw) {
-    const ar = allAreas(ev); const noArea = ev.filter(e => !e.areas.length).length;
-    $('#sumEval').innerHTML = `<b>${ev.length}</b> evaluadores · <b>${ar.length}</b> áreas distintas` +
-      (noArea ? ` · <span class="bad">${noArea} sin área</span>` : '') +
+    const ar = allAreas(ev); const stu = ev.filter(e => e.estudiante).length;
+    const noArea = ev.filter(e => !e.estudiante && !e.areas.length).length;
+    $('#sumEval').innerHTML = `<b>${ev.length - stu}</b> evaluadores académicos · <b>${stu}</b> vocal(es) estudiante · <b>${ar.length}</b> áreas distintas` +
+      (noArea ? ` · <span class="bad">${noArea} académicos sin área</span>` : '') +
+      (S.params.student && !stu ? ' · <span class="bad">No hay ningún vocal estudiante marcado (márcalo en la vista previa)</span>' : '') +
       (S.mapEval.nombre && S.mapEval.area ? '' : ' · <span class="bad">Falta indicar columnas obligatorias</span>');
   } else $('#sumEval').innerHTML = '';
   if (S.titRaw) {
     const bad = ti.filter(t => !t.nivel || !t.accion).length;
-    const cnt = {}; ti.forEach(t => { const k = (t.nivel || '?') + ' · ' + (t.accion || '?'); cnt[k] = (cnt[k] || 0) + 1; });
+    const cnt = {}; ti.forEach(t => { const k = (t.nivel || '?') + ' · ' + (ACC_CORTO[t.accion] || '?'); cnt[k] = (cnt[k] || 0) + 1; });
     $('#sumTit').innerHTML = `<b>${ti.length}</b> títulos` +
       (bad ? ` · <span class="bad">${bad} sin nivel o tipo de evaluación reconocido (corrígelos en la vista previa)</span>` : ' · <span class="ok">todos reconocidos</span>') +
       `<br><span class="muted">${Object.entries(cnt).map(([k, v]) => esc(k) + ': ' + v).join(' · ')}</span>`;
@@ -370,12 +393,16 @@ function renderPreview() {
   if (which === 'eval') {
     const ev = getEvaluators();
     if (!ev.length) { el.innerHTML = '<p class="muted" style="padding:8px">Carga la Excel de evaluadores.</p>'; return; }
-    el.innerHTML = `<table><thead><tr><th>#</th><th>Nombre</th><th>Área(s)</th><th>Universidad</th><th class="num">Capacidad</th></tr></thead><tbody>` +
-      ev.map((e, i) => `<tr><td>${i + 1}</td><td>${esc(e.nombre)}</td><td>${e.areas.map(esc).join('<br>') || '<span class="bad">—</span>'}</td><td>${esc(e.uni)}</td><td class="num">${fmt(e.cap)}</td></tr>`).join('') + '</tbody></table>';
+    el.innerHTML = `<table><thead><tr><th>#</th><th>Nombre</th><th>Estudiante</th><th>Área(s)</th><th>Universidad</th><th class="num">Capacidad</th></tr></thead><tbody>` +
+      ev.map((e, i) => `<tr><td>${i + 1}</td><td>${esc(e.nombre)}</td><td><input type="checkbox" data-id="${e.id}" ${e.estudiante ? 'checked' : ''}></td>
+        <td>${e.areas.map(esc).join('<br>') || (e.estudiante ? '' : '<span class="bad">—</span>')}</td><td>${esc(e.uni)}</td><td class="num">${fmt(e.cap)}</td></tr>`).join('') + '</tbody></table>';
+    el.querySelectorAll('input[type=checkbox]').forEach(c => c.onchange = () => {
+      S.evalOverrides[c.dataset.id] = { estudiante: c.checked }; S.asg = {}; S.locks = {}; save(); renderDatos();
+    });
   } else {
     const ti = getTitles();
     if (!ti.length) { el.innerHTML = '<p class="muted" style="padding:8px">Carga la Excel de títulos.</p>'; return; }
-    const sel = (id, k, opts, v) => `<select data-id="${id}" data-k="${k}" class="${v ? '' : 'bad'}"><option value="">?</option>${opts.map(o => `<option ${o === v ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+    const sel = (id, k, opts, v) => `<select data-id="${id}" data-k="${k}" class="${v ? '' : 'bad'}"><option value="">?</option>${opts.map(o => `<option value="${o}" ${o === v ? 'selected' : ''}>${k === 'accion' ? ACC_CORTO[o] : o}</option>`).join('')}</select>`;
     el.innerHTML = `<table><thead><tr><th>#</th><th>Código</th><th>Denominación</th><th>Universidad</th><th>Nivel</th><th>Evaluación</th><th class="num">Esfuerzo</th></tr></thead><tbody>` +
       ti.map((t, i) => `<tr><td>${i + 1}</td><td>${esc(t.codigo)}</td><td>${esc(t.denom)}</td><td>${esc(t.uni)}</td>
         <td>${sel(t.id, 'nivel', NIVELES, t.nivel)}</td><td>${sel(t.id, 'accion', ACCIONES, t.accion)}</td><td class="num">${fmt(t.effort)}</td></tr>`).join('') + '</tbody></table>';
@@ -388,29 +415,36 @@ function renderPreview() {
 
 // ---------------------------------------------------------------- render: esfuerzos
 function renderEsfuerzos() {
-  const tb = $('#effortTable');
-  tb.innerHTML = `<thead><tr><th></th>${ACCIONES.map(a => `<th class="num">${a}</th>`).join('')}</tr></thead><tbody>` +
-    NIVELES.map(n => `<tr><th>${n}</th>${ACCIONES.map(a => `<td><input type="number" min="0" step="0.25" data-n="${n}" data-a="${a}" value="${S.effort[n][a]}"></td>`).join('')}</tr>`).join('') + '</tbody>';
-  tb.querySelectorAll('input').forEach(i => i.onchange = () => { S.effort[i.dataset.n][i.dataset.a] = Math.max(0, parseFloat(i.value) || 0); save(); });
-  $('#pK').value = S.params.k; $('#pAlpha').value = S.params.alpha;
+  const W = S.weights;
+  $('#wNivel').innerHTML = NIVELES.map(n => `<tr><th>${n}</th><td><input type="number" min="0" step="0.01" data-g="nivel" data-k="${n}" value="${W.nivel[n]}"></td></tr>`).join('');
+  $('#wAccion').innerHTML = ACCIONES.map(a => `<tr><th>${ACC_CORTO[a]}</th><td><input type="number" min="0" step="0.01" data-g="accion" data-k="${a}" value="${W.accion[a]}"></td></tr>`).join('');
+  document.querySelectorAll('#wNivel input, #wAccion input').forEach(i => i.onchange = () => {
+    W[i.dataset.g][i.dataset.k] = Math.max(0, parseFloat(i.value) || 0); save(); renderEffortMatrix();
+  });
+  renderEffortMatrix();
+  $('#pK').value = S.params.k; $('#pStudent').checked = !!S.params.student; $('#pAlpha').value = S.params.alpha;
   $('#pConflict').checked = !!S.params.conflict; $('#pOnlyAffine').checked = !!S.params.onlyAffine;
+}
+function renderEffortMatrix() {
+  $('#effortTable').innerHTML = `<thead><tr><th></th>${ACCIONES.map(a => `<th class="num">${ACC_CORTO[a]}</th>`).join('')}</tr></thead><tbody>` +
+    NIVELES.map(n => `<tr><th>${n}</th>${ACCIONES.map(a => `<td class="num">${fmt(effortOf(n, a))}</td>`).join('')}</tr>`).join('') + '</tbody>';
 }
 
 // ---------------------------------------------------------------- render: afinidad
 function renderAfinidad() {
-  const ev = getEvaluators(), ti = getTitles();
+  const ev = getEvaluators();
   const areas = allAreas(ev);
   const kl = $('#kwList');
   if (!areas.length) kl.innerHTML = '<p class="muted">Carga la Excel de evaluadores para ver sus áreas.</p>';
   else {
-    kl.innerHTML = areas.map((a, i) => `<div class="kw"><div class="n">${esc(a.name)}<div class="c">${a.n} evaluador(es)</div></div>
+    kl.innerHTML = areas.map(a => `<div class="kw"><div class="n">${esc(a.name)}<div class="c">${a.n} evaluador(es)</div></div>
       <textarea rows="2" data-area="${esc(a.name)}" placeholder="Palabras clave separadas por comas">${esc(keywordsFor(a.name))}</textarea></div>`).join('');
     kl.querySelectorAll('textarea').forEach(t => t.onchange = () => { S.keywords[t.dataset.area] = t.value; save(); renderAffSummary(); });
   }
   renderAffSummary();
 }
 function renderAffSummary() {
-  const ev = getEvaluators(), ti = getTitles(); const el = $('#affSummary');
+  const ev = getEvaluators().filter(e => !e.estudiante), ti = getTitles(); const el = $('#affSummary');
   if (!ev.length || !ti.length) { el.innerHTML = '<p class="muted" style="padding:8px">Carga ambas Excel.</p>'; return; }
   const aff = buildAffinity(ev, ti);
   const rows = ti.map(t => {
@@ -418,40 +452,50 @@ function renderAffSummary() {
     return { t, list };
   }).sort((a, b) => a.list.length - b.list.length);
   el.innerHTML = `<table><thead><tr><th>Título</th><th class="num">Afines</th><th>Evaluadores afines (por grado de afinidad)</th></tr></thead><tbody>` +
-    rows.map(({ t, list }) => `<tr><td>${esc(t.denom)}</td><td class="num ${list.length ? '' : 'bad'}">${list.length}</td>
+    rows.map(({ t, list }) => `<tr><td>${esc(t.denom)}</td><td class="num ${list.length >= K_() ? '' : 'bad'}">${list.length}</td>
       <td>${list.slice(0, 8).map(x => `<span class="tag aff-${affLevel(x.h)}">${esc(x.e.nombre)}</span>`).join(' ')}${list.length > 8 ? ' …' : ''}</td></tr>`).join('') + '</tbody></table>';
 }
 
 // ---------------------------------------------------------------- render: asignación
 let selEval = null;
+function loadRows(list, mx) {
+  return list.map(p => {
+    const cls = p.target && p.load > p.target * 1.2 ? 'over' : (p.target && p.load < p.target * 0.8 ? 'under' : '');
+    return `<div class="loadrow ${selEval === p.e.id ? 'sel' : ''}" data-id="${p.e.id}" title="${esc(p.e.areas.join('; '))}">
+      <span class="name">${esc(p.e.nombre)} <span class="muted">(${p.n})</span></span>
+      <span class="track"><span class="fill ${cls}" style="width:${100 * p.load / mx}%"></span><span class="target" style="left:${100 * p.target / mx}%"></span></span>
+      <span class="val">${fmt(p.load)}</span></div>`;
+  }).join('');
+}
 function renderAsignacion() {
   const st = stats();
-  const { evals, titles, aff, per, K } = st;
+  const { evals, titles, aff, per, N } = st;
   $('#runInfo').textContent = S.lastRun ? 'Último cálculo: ' + new Date(S.lastRun).toLocaleString('es-ES') : '';
   const assigned = st.slots - st.empty;
   $('#kpis').innerHTML = !titles.length ? '' : [
-    [titles.length, 'títulos'], [fmt(st.D), 'esfuerzo total'],
-    [assigned + '/' + st.slots, 'plazas asignadas'],
+    [titles.length, 'títulos'], [fmt(st.D), 'esfuerzo por título (suma)'],
+    [assigned + '/' + st.slots, 'plazas de académicos asignadas'],
+    ...(S.params.student ? [[(titles.length - st.emptyStu) + '/' + titles.length, 'con vocal estudiante']] : []),
     [assigned ? Math.round(100 * st.lv[2] / assigned) + ' %' : '—', 'afinidad alta'],
     [assigned ? Math.round(100 * st.lv[1] / assigned) + ' %' : '—', 'afinidad media'],
-    [st.lv[0], 'sin afinidad'], [fmt(st.dev), 'desviación típica de carga'],
+    [st.lv[0], 'sin afinidad'], [fmt(st.dev), 'desv. típica de carga (académicos)'],
     [st.conflicts, 'conflictos de universidad']
   ].map(([v, l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join('');
 
   // cargas
-  const list = Object.values(per).sort((a, b) => b.load - a.load);
-  const mx = Math.max(1, ...list.map(p => Math.max(p.load, p.target)));
-  $('#loads').innerHTML = !list.length ? '<p class="muted">Sin evaluadores.</p>' :
-    list.map(p => {
-      const cls = p.target && p.load > p.target * 1.2 ? 'over' : (p.target && p.load < p.target * 0.8 ? 'under' : '');
-      return `<div class="loadrow ${selEval === p.e.id ? 'sel' : ''}" data-id="${p.e.id}" title="${esc(p.e.areas.join('; '))}">
-        <span class="name">${esc(p.e.nombre)} <span class="muted">(${p.n})</span></span>
-        <span class="track"><span class="fill ${cls}" style="width:${100 * p.load / mx}%"></span><span class="target" style="left:${100 * p.target / mx}%"></span></span>
-        <span class="val">${fmt(p.load)}</span></div>`;
-    }).join('') + '<p class="muted">La raya vertical marca la carga objetivo. Pulsa un evaluador para filtrar sus títulos.</p>';
+  const all = Object.values(per);
+  const acad = all.filter(p => !p.e.estudiante).sort((a, b) => b.load - a.load);
+  const stu = all.filter(p => p.e.estudiante).sort((a, b) => b.load - a.load);
+  const mx = Math.max(1e-9, ...acad.map(p => Math.max(p.load, p.target)));
+  const mxs = Math.max(1e-9, ...stu.map(p => Math.max(p.load, p.target)));
+  $('#loads').innerHTML = !all.length ? '<p class="muted">Sin evaluadores.</p>' :
+    `<h3>Académicos</h3>${loadRows(acad, mx)}` +
+    (stu.length ? `<h3>Vocales estudiantes</h3>${loadRows(stu, mxs)}` : '') +
+    '<p class="muted">La raya vertical marca la carga objetivo. Pulsa un evaluador para filtrar sus títulos.</p>';
   $('#loads').querySelectorAll('.loadrow').forEach(r => r.onclick = () => { selEval = selEval === r.dataset.id ? null : r.dataset.id; renderAsignacion(); });
 
   // tabla
+  if (!titles.length || !evals.length) { $('#asgTable').innerHTML = '<p class="muted" style="padding:8px">Carga ambas Excel en la pestaña Datos.</p>'; return; }
   const f = norm($('#filterAsg').value);
   const E = {}; evals.forEach(e => E[e.id] = e);
   const rows = titles.filter(t => {
@@ -460,23 +504,24 @@ function renderAsignacion() {
     if (!f) return true;
     return norm([t.denom, t.codigo, t.uni, t.nivel, t.accion, ...a.map(j => E[j] ? E[j].nombre : '')].join(' ')).includes(f);
   });
-  if (!titles.length || !evals.length) { $('#asgTable').innerHTML = '<p class="muted" style="padding:8px">Carga ambas Excel en la pestaña Datos.</p>'; return; }
-  const opts = (t, cur) => {
-    const o = evals.map(e => ({ e, h: aff[t.id][e.id], c: uniConflict(t, e) }))
-      .sort((a, b) => (b.h - a.h) || ((per[a.e.id].load - per[a.e.id].target) - (per[b.e.id].load - per[b.e.id].target)));
+  const opts = (t, s, cur) => {
+    const stuSlot = isStudentSlot(s);
+    const o = evals.filter(e => e.estudiante === stuSlot).map(e => ({ e, h: aff[t.id][e.id], c: uniConflict(t, e) }))
+      .sort((a, b) => (stuSlot ? 0 : b.h - a.h) || ((per[a.e.id].load - per[a.e.id].target) - (per[b.e.id].load - per[b.e.id].target)));
     return `<option value="">— sin asignar —</option>` + o.map(x =>
-      `<option value="${x.e.id}" ${x.e.id === cur ? 'selected' : ''}>${['○', '◐', '●'][affLevel(x.h)]} ${esc(x.e.nombre)} · ${fmt(per[x.e.id].load)}${x.c ? ' · ⚠ misma univ.' : ''}</option>`).join('');
+      `<option value="${x.e.id}" ${x.e.id === cur ? 'selected' : ''}>${stuSlot ? '' : ['○', '◐', '●'][affLevel(x.h)] + ' '}${esc(x.e.nombre)} · ${fmt(per[x.e.id].load)}${x.c ? ' · ⚠ misma univ.' : ''}</option>`).join('');
   };
-  $('#asgTable').innerHTML = `<table><thead><tr><th>Título</th><th>Nivel · evaluación</th><th class="num">Esf.</th>${Array.from({ length: K }, (_, s) => `<th>Evaluador${K > 1 ? ' ' + (s + 1) : ''}</th>`).join('')}</tr></thead><tbody>` +
+  $('#asgTable').innerHTML = `<table><thead><tr><th>Título</th><th>Nivel · evaluación</th><th class="num">Esf.</th>${Array.from({ length: N }, (_, s) => `<th>${slotName(s)}</th>`).join('')}</tr></thead><tbody>` +
     rows.map(t => {
       const a = S.asg[t.id] || [], lk = S.locks[t.id] || [];
       return `<tr><td>${esc(t.denom)}${t.uni ? `<br><span class="muted">${esc(t.uni)}</span>` : ''}</td>
-        <td>${esc(t.nivel || '?')} · ${esc(t.accion || '?')}</td><td class="num">${fmt(t.effort)}</td>` +
-        Array.from({ length: K }, (_, s) => {
+        <td>${esc(t.nivel || '?')} · ${esc(ACC_CORTO[t.accion] || '?')}</td><td class="num">${fmt(t.effort)}</td>` +
+        Array.from({ length: N }, (_, s) => {
           const j = a[s]; const h = j && aff[t.id][j] != null ? aff[t.id][j] : 0;
-          return `<td><select data-t="${t.id}" data-s="${s}">${opts(t, j)}</select>
+          const tag = !j ? '<span class="tag aff-0">sin asignar</span>' : isStudentSlot(s) ? '' : `<span class="tag aff-${affLevel(h)}">${AFF_TXT[affLevel(h)]}</span>`;
+          return `<td><select data-t="${t.id}" data-s="${s}">${opts(t, s, j)}</select>
             <span class="lock" data-t="${t.id}" data-s="${s}" title="${lk[s] ? 'Fijado: pulsa para liberar' : 'Pulsa para fijar'}">${lk[s] ? '🔒' : '🔓'}</span>
-            ${j ? `<br><span class="tag aff-${affLevel(h)}">${AFF_TXT[affLevel(h)]}</span>${E[j] && uniConflict(t, E[j]) ? ' <span class="tag aff-0">misma universidad</span>' : ''}` : '<br><span class="tag aff-0">sin asignar</span>'}</td>`;
+            <br>${tag}${j && E[j] && uniConflict(t, E[j]) ? ' <span class="tag aff-0">misma universidad</span>' : ''}</td>`;
         }).join('') + '</tr>';
     }).join('') + '</tbody></table>';
   $('#asgTable').querySelectorAll('select').forEach(sel => sel.onchange = () => {
@@ -492,40 +537,53 @@ function renderAsignacion() {
 
 // ---------------------------------------------------------------- exportación
 function exportXlsx() {
-  const st = stats(); const { titles, aff, per, K } = st;
+  const st = stats(); const { titles, aff, per, N } = st;
   if (!titles.length) return alert('No hay datos.');
   const E = {}; st.evals.forEach(e => E[e.id] = e);
   const h1 = ['Código', 'Denominación', 'Universidad', 'Nivel', 'Evaluación', 'Esfuerzo'];
-  for (let s = 0; s < K; s++) h1.push('Evaluador' + (K > 1 ? ' ' + (s + 1) : ''), 'Área evaluador' + (K > 1 ? ' ' + (s + 1) : ''), 'Afinidad' + (K > 1 ? ' ' + (s + 1) : ''));
+  for (let s = 0; s < N; s++) {
+    if (isStudentSlot(s)) h1.push('Vocal estudiante');
+    else h1.push(slotName(s), 'Área ' + (s + 1), 'Afinidad ' + (s + 1));
+  }
   const r1 = titles.map(t => {
-    const row = [t.codigo, t.denom, t.uni, t.nivel, t.accion, t.effort]; const a = S.asg[t.id] || [];
-    for (let s = 0; s < K; s++) { const e = E[a[s]]; row.push(e ? e.nombre : '', e ? e.areas.join('; ') : '', e ? AFF_TXT[affLevel(aff[t.id][e.id])] : ''); }
+    const row = [t.codigo, t.denom, t.uni, t.nivel, ACC_CORTO[t.accion] || '', t.effort]; const a = S.asg[t.id] || [];
+    for (let s = 0; s < N; s++) {
+      const e = E[a[s]];
+      if (isStudentSlot(s)) row.push(e ? e.nombre : '');
+      else row.push(e ? e.nombre : '', e ? e.areas.join('; ') : '', e ? AFF_TXT[affLevel(aff[t.id][e.id])] : '');
+    }
     return row;
   });
-  const r2 = Object.values(per).sort((a, b) => a.e.nombre.localeCompare(b.e.nombre, 'es')).map(p =>
-    [p.e.nombre, p.e.areas.join('; '), p.e.uni, p.e.email, p.n, p.load, Math.round(p.target * 100) / 100, Math.round((p.load - p.target) * 100) / 100]);
+  const sorted = Object.values(per).sort((a, b) => (a.e.estudiante - b.e.estudiante) || a.e.nombre.localeCompare(b.e.nombre, 'es'));
+  const r2 = sorted.map(p => [p.e.nombre, p.e.estudiante ? 'Estudiante' : 'Académico', p.e.areas.join('; '), p.e.uni, p.e.email, p.n,
+    Math.round(p.load * 1000) / 1000, Math.round(p.target * 1000) / 1000, Math.round((p.load - p.target) * 1000) / 1000]);
   const r3 = [];
-  Object.values(per).sort((a, b) => a.e.nombre.localeCompare(b.e.nombre, 'es')).forEach(p =>
-    p.items.forEach(t => r3.push([p.e.nombre, p.e.email, t.codigo, t.denom, t.uni, t.nivel, t.accion, t.effort, AFF_TXT[affLevel(aff[t.id][p.e.id])]])));
+  sorted.forEach(p => p.items.forEach(t => r3.push([p.e.nombre, p.e.estudiante ? 'Estudiante' : 'Académico', p.e.email, t.codigo, t.denom, t.uni, t.nivel, ACC_CORTO[t.accion] || '', t.effort,
+    p.e.estudiante ? '' : AFF_TXT[affLevel(aff[t.id][p.e.id])]])));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([h1, ...r1]), 'Asignaciones');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Evaluador', 'Área(s)', 'Universidad', 'Email', 'Nº títulos', 'Carga', 'Carga objetivo', 'Desviación'], ...r2]), 'Carga por evaluador');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Evaluador', 'Email', 'Código', 'Denominación', 'Universidad', 'Nivel', 'Evaluación', 'Esfuerzo', 'Afinidad'], ...r3]), 'Detalle por evaluador');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Nivel', ...ACCIONES], ...NIVELES.map(n => [n, ...ACCIONES.map(a => S.effort[n][a])])]), 'Esfuerzos');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Evaluador', 'Perfil', 'Área(s)', 'Universidad', 'Email', 'Nº títulos', 'Carga', 'Carga objetivo', 'Desviación'], ...r2]), 'Carga por evaluador');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Evaluador', 'Perfil', 'Email', 'Código', 'Denominación', 'Universidad', 'Nivel', 'Evaluación', 'Esfuerzo', 'Afinidad'], ...r3]), 'Detalle por evaluador');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+    ['Pesos', ''], ...NIVELES.map(n => [n, S.weights.nivel[n]]), ...ACCIONES.map(a => [ACC_CORTO[a], S.weights.accion[a]]), [],
+    ['Esfuerzo (nivel × tipo)', ...ACCIONES.map(a => ACC_CORTO[a])], ...NIVELES.map(n => [n, ...ACCIONES.map(a => effortOf(n, a))])]), 'Esfuerzos');
   XLSX.writeFile(wb, 'asignaciones_' + new Date().toISOString().slice(0, 10) + '.xlsx');
 }
 function downloadTemplate(kind) {
   const wb = XLSX.utils.book_new();
   const data = kind === 'eval' ? [
-    ['Nombre', 'Apellidos', 'Área de conocimiento', 'Universidad', 'Capacidad', 'Email'],
-    ['Ana', 'García López', 'Ingeniería Mecánica', 'Universidad de Ejemplo', 1, 'ana@ejemplo.es'],
-    ['Luis', 'Pérez Martín', 'Teoría de la Señal y Comunicaciones', 'Universidad Modelo', 1, 'luis@ejemplo.es'],
-    ['Marta', 'Ruiz Sanz', 'Ingeniería Eléctrica; Tecnología Electrónica', 'Universidad Muestra', 0.5, 'marta@ejemplo.es']
+    ['Nombre', 'Apellidos', 'Perfil', 'Área de conocimiento', 'Universidad', 'Capacidad', 'Email'],
+    ['Ana', 'García López', 'Académico', 'Ingeniería Mecánica', 'Universidad de Ejemplo', 1, 'ana@ejemplo.es'],
+    ['Luis', 'Pérez Martín', 'Académico', 'Teoría de la Señal y Comunicaciones', 'Universidad Modelo', 1, 'luis@ejemplo.es'],
+    ['Marta', 'Ruiz Sanz', 'Académico', 'Ingeniería Eléctrica; Tecnología Electrónica', 'Universidad Muestra', 0.5, 'marta@ejemplo.es'],
+    ['Pablo', 'Gil Ortega', 'Estudiante', '', 'Universidad Muestra', 1, 'pablo@ejemplo.es']
   ] : [
     ['RUCT', 'Denominación', 'Nivel', 'Tipo de evaluación', 'Universidad'],
-    ['2500001', 'Grado en Ingeniería Mecánica', 'Grado', 'Verificación', 'Universidad Modelo'],
-    ['4300001', 'Máster Universitario en Ingeniería de Telecomunicación', 'Máster', 'Modificación', 'Universidad de Ejemplo'],
-    ['2500002', 'Grado en Ingeniería Eléctrica', 'Grado', 'Seguimiento', 'Universidad Muestra']
+    ['2500001', 'Grado en Ingeniería Mecánica', 'Grado', 'Verifica', 'Universidad Modelo'],
+    ['4300001', 'Máster Universitario en Ingeniería de Telecomunicación', 'Máster', 'Modifica', 'Universidad de Ejemplo'],
+    ['2500002', 'Grado en Ingeniería Eléctrica', 'Grado', 'Seguimiento', 'Universidad Muestra'],
+    ['2500003', 'Grado en Ingeniería Química', 'Grado', 'AleVerifica', 'Universidad Modelo'],
+    ['4300002', 'Máster Universitario en Ingeniería Industrial', 'Máster', 'AleModifica', 'Universidad de Ejemplo']
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), kind === 'eval' ? 'Evaluadores' : 'Títulos');
   XLSX.writeFile(wb, kind === 'eval' ? 'plantilla_evaluadores.xlsx' : 'plantilla_titulos.xlsx');
@@ -543,7 +601,7 @@ function init() {
   });
   $('#fileEval').onchange = async (ev) => {
     const f = ev.target.files[0]; if (!f) return;
-    try { S.evalRaw = await readFile(f); S.mapEval = detectMap(S.evalRaw.headers, EVAL_FIELDS); S.asg = {}; S.locks = {}; save(); renderAll(); }
+    try { S.evalRaw = await readFile(f); S.mapEval = detectMap(S.evalRaw.headers, EVAL_FIELDS); S.evalOverrides = {}; S.asg = {}; S.locks = {}; save(); renderAll(); }
     catch (e) { alert('No se pudo leer el fichero: ' + e.message); }
   };
   $('#fileTit').onchange = async (ev) => {
@@ -554,8 +612,9 @@ function init() {
   document.querySelectorAll('input[name=prev]').forEach(r => r.onchange = renderPreview);
   $('#tplEval').onclick = () => downloadTemplate('eval');
   $('#tplTit').onclick = () => downloadTemplate('tit');
-  $('#btnEffortDefault').onclick = () => { S.effort = JSON.parse(JSON.stringify(DEFAULT_EFFORT)); save(); renderEsfuerzos(); };
-  $('#pK').onchange = (e) => { S.params.k = Math.min(5, Math.max(1, parseInt(e.target.value) || 1)); save(); };
+  $('#btnEffortDefault').onclick = () => { S.weights = JSON.parse(JSON.stringify(DEFAULT_WEIGHTS)); save(); renderEsfuerzos(); };
+  $('#pK').onchange = (e) => { S.params.k = Math.min(5, Math.max(1, parseInt(e.target.value) || 1)); S.asg = {}; S.locks = {}; save(); };
+  $('#pStudent').onchange = (e) => { S.params.student = e.target.checked; S.asg = {}; S.locks = {}; save(); renderDatos(); };
   $('#pAlpha').onchange = (e) => { S.params.alpha = +e.target.value; save(); };
   $('#pConflict').onchange = (e) => { S.params.conflict = e.target.checked; save(); };
   $('#pOnlyAffine').onchange = (e) => { S.params.onlyAffine = e.target.checked; save(); };
